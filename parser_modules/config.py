@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import yaml
+from datetime import datetime, date
 from typing import Dict, List, Any, Optional
 
 logger = logging.getLogger("telegram_parser.config")
@@ -30,6 +31,15 @@ class Config:
         self.limit = 100
         self.output_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "output")
         self.export_format = "xlsx"
+        
+        # Date range for filtering
+        self.start_date = None  # datetime.date object
+        self.end_date = None    # datetime.date object
+        
+        # Performance settings
+        self.scroll_delay = 0.2  # Delay between scrolls in seconds
+        self.batch_size = 10     # Number of scrolls per batch
+        self.wait_time = 1.0     # Wait time after batch scrolling
         
         # Load configuration from file if provided
         if config_path and os.path.exists(config_path):
@@ -58,6 +68,37 @@ class Config:
             if 'parser' in config_data:
                 parser_config = config_data['parser']
                 self.limit = parser_config.get('limit', self.limit)
+                
+                # Load date range if specified
+                if 'date_range' in parser_config:
+                    date_range = parser_config['date_range']
+                    start_date = date_range.get('start')
+                    end_date = date_range.get('end')
+                    
+                    if start_date:
+                        try:
+                            if isinstance(start_date, str):
+                                self.start_date = datetime.strptime(start_date, "%Y-%m-%d").date()
+                            elif isinstance(start_date, date):
+                                self.start_date = start_date
+                        except ValueError:
+                            logger.error(f"Invalid start date format: {start_date}. Use YYYY-MM-DD")
+                            
+                    if end_date:
+                        try:
+                            if isinstance(end_date, str):
+                                self.end_date = datetime.strptime(end_date, "%Y-%m-%d").date()
+                            elif isinstance(end_date, date):
+                                self.end_date = end_date
+                        except ValueError:
+                            logger.error(f"Invalid end date format: {end_date}. Use YYYY-MM-DD")
+                
+                # Load performance settings
+                if 'performance' in parser_config:
+                    perf_config = parser_config['performance']
+                    self.scroll_delay = perf_config.get('scroll_delay', self.scroll_delay)
+                    self.batch_size = perf_config.get('batch_size', self.batch_size)
+                    self.wait_time = perf_config.get('wait_time', self.wait_time)
                 
             if 'channels' in config_data and isinstance(config_data['channels'], list):
                 self.channels = config_data['channels']
@@ -94,6 +135,19 @@ class Config:
             
         if hasattr(args, 'format') and args.format:
             self.export_format = args.format
+            
+        # Parse date range arguments
+        if hasattr(args, 'start_date') and args.start_date:
+            try:
+                self.start_date = datetime.strptime(args.start_date, "%Y-%m-%d").date()
+            except ValueError:
+                logger.error(f"Invalid start date format: {args.start_date}. Use YYYY-MM-DD")
+                
+        if hasattr(args, 'end_date') and args.end_date:
+            try:
+                self.end_date = datetime.strptime(args.end_date, "%Y-%m-%d").date()
+            except ValueError:
+                logger.error(f"Invalid end date format: {args.end_date}. Use YYYY-MM-DD")
             
     def load_channels_from_file(self, file_path: str) -> List[Dict[str, Any]]:
         """
@@ -174,14 +228,4 @@ class Config:
         logger.info(f"Loaded {len(channels)} channels from {file_path}")
         return channels
         
-    def __str__(self) -> str:
-        """Get string representation of configuration."""
-        return (
-            f"Config(phone={'*' * len(self.phone) if self.phone else None}, "
-            f"headless={self.headless}, "
-            f"proxy={self.proxy}, "
-            f"channels_count={len(self.channels)}, "
-            f"limit={self.limit}, "
-            f"output_dir={self.output_dir}, "
-            f"export_format={self.export_format})"
-        )
+    def __str__(self) ->
