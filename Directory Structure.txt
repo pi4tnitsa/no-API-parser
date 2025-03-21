@@ -1,0 +1,13 @@
+telegram-parser/
+├── main.py                    # Main entry point
+├── config.yaml                # Configuration file
+├── requirements.txt           # Dependencies
+├── README.md                  # Documentation
+├── parser_modules/            # Parser modules
+│   ├── __init__.py
+│   ├── auth.py                # Authentication module
+│   ├── channel_parser.py      # Channel parsing logic
+│   ├── data_exporter.py       # Data export functionality
+│   └── config.py              # Configuration manager
+├── logs/                      # Log files
+└── output/                    # Exported data

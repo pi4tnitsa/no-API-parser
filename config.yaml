@@ -1,0 +1,36 @@
+# Telegram Parser Configuration Example
+
+# Authentication settings
+auth:
+  # Your Telegram phone number with country code (e.g., +12025550123)
+  phone: "+66620673176"
+  # Run browser in headless mode (without UI)
+  headless: false
+  # Optional proxy URL (e.g., socks5://user:pass@host:port)
+  proxy: null
+
+# Parser settings
+parser:
+  # Maximum number of posts to parse per channel
+  limit: 100
+
+# List of channels to parse
+channels:
+  - name: "WTF Moldova?!"  # Channel username without @
+    description: ""Şi za h**nea?" Или как говорят во всем мире: WTF!? Такова первая реакция на происходящие в Молдове события.
+    Здесь мы собрали именно такие случаи и факты. Давайте попытаемся разобраться, что же в этой стране, бл**ь, происходит."  
+    # Optional description
+  - name: "wtfmoldova"
+    description: "Official Telegram Channel"
+  # You can also use channel IDs or full URLs
+  - id: "1660879039"
+    description: "Channel by ID"
+  - url: "https://t.me/wtfmoldova"
+    description: "Channel by URL"
+
+# Output settings
+output:
+  # Directory to save results
+  directory: "/Users/vitaliipiatnitsa/Desktop/web parser"
+  # Export format (json, csv, xlsx)
+  format: "xlsx"
