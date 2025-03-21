@@ -228,4 +228,21 @@ class Config:
         logger.info(f"Loaded {len(channels)} channels from {file_path}")
         return channels
         
-    def __str__(self) ->
+    def __str__(self) -> str:
+    """Return string representation of the config."""
+    config_info = [
+        f"Configuration:",
+        f"  Phone: {self.phone}",
+        f"  Headless mode: {self.headless}",
+        f"  Proxy: {self.proxy}",
+        f"  Channels: {len(self.channels)} defined",
+        f"  Message limit: {self.limit}",
+        f"  Output directory: {self.output_dir}",
+        f"  Export format: {self.export_format}",
+        f"  Date range: {self.start_date or 'None'} to {self.end_date or 'None'}",
+        f"  Performance settings:",
+        f"    - Scroll delay: {self.scroll_delay}s",
+        f"    - Batch size: {self.batch_size}",
+        f"    - Wait time: {self.wait_time}s"
+    ]
+    return "\n".join(config_info)
