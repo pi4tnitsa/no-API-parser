@@ -241,11 +241,11 @@ class ChannelParser:
             # Initialize scrolling position to start at the bottom (newest messages)
             await self.page.evaluate('''
                 () => {
-                    const chatContainer = document.querySelector('.chat-container');
-                    if (chatContainer) {
+                    const middleColumn = document.querySelector('#MiddleColumn');
+                    if (middleColumn) {
                         // Scroll to the very bottom to ensure we start with newest messages
-                        chatContainer.scrollTop = chatContainer.scrollHeight;
-                        console.log('Initialized to newest messages at:', chatContainer.scrollTop);
+                        middleColumn.scrollTop = middleColumn.scrollHeight;
+                        console.log('Initialized to newest messages at:', middleColumn.scrollTop);
                     }
                 }
             ''')
@@ -331,8 +331,8 @@ class ChannelParser:
                 # Check if we're at the top of the chat
                 at_top = await self.page.evaluate('''
                     () => {
-                        const chatContainer = document.querySelector('.chat-container');
-                        return chatContainer && chatContainer.scrollTop <= 10;
+                        const middleColumn = document.querySelector('#MiddleColumn');
+                        return middleColumn && middleColumn.scrollTop <= 10;
                     }
                 ''')
                 
@@ -345,21 +345,21 @@ class ChannelParser:
                 for _ in range(scroll_batch_size):
                     scroll_result = await self.page.evaluate('''
                         () => {
-                            const chatContainer = document.querySelector('.chat-container');
-                            if (chatContainer) {
+                            const middleColumn = document.querySelector('#MiddleColumn');
+                            if (middleColumn) {
                                 // Check if we're already at the top
-                                if (chatContainer.scrollTop <= 10) {
+                                if (middleColumn.scrollTop <= 10) {
                                     return false;
                                 }
                                 
                                 // Store previous position
-                                const oldScrollTop = chatContainer.scrollTop;
+                                const oldScrollTop = middleColumn.scrollTop;
                                 
                                 // Scroll up by 800px to load older messages
-                                chatContainer.scrollTop -= 800;
+                                middleColumn.scrollTop -= 800;
                                 
                                 // Return true if the scroll position changed
-                                return oldScrollTop !== chatContainer.scrollTop;
+                                return oldScrollTop !== middleColumn.scrollTop;
                             }
                             return false;
                         }
@@ -375,12 +375,12 @@ class ChannelParser:
                 # Log scroll status
                 scroll_status = await self.page.evaluate('''
                     () => {
-                        const chatContainer = document.querySelector('.chat-container');
-                        if (chatContainer) {
+                        const middleColumn = document.querySelector('#MiddleColumn');
+                        if (middleColumn) {
                             return {
-                                scrollTop: chatContainer.scrollTop,
-                                scrollHeight: chatContainer.scrollHeight,
-                                clientHeight: chatContainer.clientHeight
+                                scrollTop: middleColumn.scrollTop,
+                                scrollHeight: middleColumn.scrollHeight,
+                                clientHeight: middleColumn.clientHeight
                             };
                         }
                         return null;
