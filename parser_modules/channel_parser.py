@@ -51,8 +51,374 @@ class ChannelParser:
             "parsed_at": datetime.now().isoformat()
         }
         
+    async def _navigate_to_channel(self, channel_identifier: str) -> None:
+        """Navigate to the channel page."""
+        # Clean up the identifier
+        if channel_identifier.startswith("@"):
+            channel_identifier = channel_identifier[1:]
+            
+        # Construct URL
+        if channel_identifier.startswith("https://"):
+            url = channel_identifier
+        else:
+            url = f"https://web.telegram.org/k/#@{channel_identifier}"
+            
+        logger.info(f"Navigating to: {url}")
+        
+        try:
+            await self.page.goto(url, {'waitUntil': 'networkidle0', 'timeout': 60000})
+            await asyncio.sleep(5)  # Wait for possible redirects and content load
+            
+            # Check if we're on the channel page
+            channel_title = await self._get_channel_title()
+            if not channel_title:
+                logger.warning(f"Could not find channel: {channel_identifier}")
+                raise Exception(f"Channel not found: {channel_identifier}")
+                
+            logger.info(f"Successfully navigated to channel: {channel_title}")
+        except Exception as e:
+            logger.error(f"Error navigating to channel {channel_identifier}: {str(e)}")
+            raise
+            
+    async def _get_channel_info(self) -> Dict[str, Any]:
+        """Get channel information."""
+        channel_info = {}
+        
+        try:
+            # Get channel title
+            channel_title = await self._get_channel_title()
+            channel_info["title"] = channel_title
+            
+            # Get channel description
+            try:
+                # Updated selector for channel description
+                description_element = await self.page.querySelector('.chat-info .info .subtitle')
+                if description_element:
+                    channel_info["description"] = await self.page.evaluate('(element) => element.textContent', description_element)
+            except Exception as e:
+                logger.debug(f"Could not get channel description: {str(e)}")
+                
+            # Get subscriber count
+            try:
+                # Updated selector for subscribers count
+                subscribers_element = await self.page.querySelector('.chat-info-container .profile-subtitle')
+                if subscribers_element:
+                    subscribers_text = await self.page.evaluate('(element) => element.textContent', subscribers_element)
+                    subscribers_match = re.search(r'(\d+(?:\.\d+)?[KMG]?)', subscribers_text)
+                    if subscribers_match:
+                        channel_info["subscribers"] = subscribers_match.group(1)
+            except Exception as e:
+                logger.debug(f"Could not get subscriber count: {str(e)}")
+                
+            # Get channel username/link
+            current_url = self.page.url
+            if "@" in current_url:
+                username = current_url.split("@")[-1]
+                channel_info["username"] = username
+                channel_info["url"] = f"https://t.me/{username}"
+            
+            logger.info(f"Channel info: {channel_info}")
+            return channel_info
+        except Exception as e:
+            logger.error(f"Error getting channel info: {str(e)}")
+            return {"title": "Unknown", "error": str(e)}
+            
+    async def _get_channel_title(self) -> Optional[str]:
+        """Get the channel title."""
+        try:
+            # Updated selector for channel title
+            title_element = await self.page.querySelector('.chat-info .peer-title')
+            if title_element:
+                return await self.page.evaluate('(element) => element.textContent', title_element)
+            return None
+        except Exception:
+            return None
+
+    async def _is_date_in_range(self, element) -> bool:
+        """Check if message date is within the specified date range."""
+        if not (self.config.start_date or self.config.end_date):
+            return True  # No date filtering
+            
+        try:
+            # Get date element
+            date_element = await element.querySelector('.message-date-group')
+            if not date_element:
+                date_element = await element.querySelector('.time')
+                
+            if not date_element:
+                return True  # Can't determine date, include by default
+                
+            date_text = await self.page.evaluate('(element) => element.textContent', date_element)
+            
+            # Try to parse the date
+            # First check if it has a timestamp attribute
+            timestamp = await self.page.evaluate('''
+                (element) => {
+                    const timeElem = element.querySelector('[data-timestamp]');
+                    if (timeElem) {
+                        return parseInt(timeElem.getAttribute('data-timestamp'), 10);
+                    }
+                    return null;
+                }
+            ''', element)
+            
+            if timestamp:
+                msg_date = datetime.fromtimestamp(timestamp / 1000)  # Convert from ms to seconds
+            else:
+                # Try to parse from text
+                # Handle different date formats (today, yesterday, date)
+                current_date = datetime.now()
+                
+                if "today" in date_text.lower():
+                    msg_date = current_date
+                elif "yesterday" in date_text.lower():
+                    msg_date = current_date - timedelta(days=1)
+                else:
+                    # Try to parse the date
+                    try:
+                        # Attempt multiple date formats
+                        date_formats = [
+                            "%d.%m.%Y",  # 01.01.2023
+                            "%d.%m.%y",   # 01.01.23
+                            "%b %d",      # Jan 01
+                            "%d %b",      # 01 Jan
+                            "%B %d",      # January 01
+                            "%d %B"       # 01 January
+                        ]
+                        
+                        for fmt in date_formats:
+                            try:
+                                # Add year if not in format
+                                if "%y" not in fmt and "%Y" not in fmt:
+                                    parsed_date = datetime.strptime(date_text, fmt)
+                                    # Set the year to current year
+                                    msg_date = parsed_date.replace(year=current_date.year)
+                                    # If the date is in the future, it's probably from last year
+                                    if msg_date > current_date:
+                                        msg_date = msg_date.replace(year=current_date.year - 1)
+                                    break
+                                else:
+                                    msg_date = datetime.strptime(date_text, fmt)
+                                    break
+                            except ValueError:
+                                continue
+                        else:
+                            # If no format matched, default to include the message
+                            return True
+                    except Exception:
+                        # If parsing fails, include the message
+                        return True
+            
+            # Check against date range
+            if self.config.start_date and msg_date.date() < self.config.start_date:
+                return False
+                
+            if self.config.end_date and msg_date.date() > self.config.end_date:
+                return False
+                
+            return True
+            
+        except Exception as e:
+            logger.debug(f"Error checking date range: {str(e)}")
+            return True  # Include by default if there's an error
+            
+    async def _get_posts(self) -> List[Dict[str, Any]]:
+        """Get posts from the channel in chronological order from newest to oldest."""
+        posts = []
+        post_limit = self.config.limit
+        
+        logger.info(f"Getting up to {post_limit} posts from newest to oldest")
+        
+        try:
+            # Track processed messages to avoid duplicates
+            processed_ids = set()
+            consecutive_no_new_posts = 0
+            max_no_new_attempts = 5
+            scroll_batch_size = 10  # Number of scrolls before processing messages
+            scroll_count = 0
+            batch_start_time = time.time()
+            
+            # Initialize scrolling position to start at the bottom (newest messages)
+            await self.page.evaluate('''
+                () => {
+                    const chatContainer = document.querySelector('.chat-container');
+                    if (chatContainer) {
+                        // Scroll to the very bottom to ensure we start with newest messages
+                        chatContainer.scrollTop = chatContainer.scrollHeight;
+                        console.log('Initialized to newest messages at:', chatContainer.scrollTop);
+                    }
+                }
+            ''')
+            
+            # Wait for initial messages to load properly
+            await asyncio.sleep(3)  
+            
+            while len(posts) < post_limit and consecutive_no_new_posts < max_no_new_attempts:
+                # Get all visible message elements (starting with newest)
+                message_elements = await self.page.querySelectorAll('.message, .bubble, .message-list-item')
+                
+                if not message_elements:
+                    logger.debug("No message elements found with current selectors")
+                    consecutive_no_new_posts += 1
+                    continue
+                
+                logger.debug(f"Found {len(message_elements)} message elements visible")
+                new_posts_in_batch = 0
+                
+                # Process visible messages (newest first)
+                for msg_element in message_elements:
+                    if len(posts) >= post_limit:
+                        break
+                        
+                    try:
+                        # Get message ID to avoid duplicates
+                        msg_id = await self.page.evaluate('''
+                            (element) => {
+                                return element.getAttribute('data-mid') || 
+                                    element.getAttribute('data-message-id') ||
+                                    element.id || 
+                                    null;
+                            }
+                        ''', msg_element)
+                        
+                        if not msg_id or msg_id in processed_ids:
+                            continue
+                        
+                        processed_ids.add(msg_id)
+                        
+                        # Check date range
+                        in_range = await self._is_date_in_range(msg_element)
+                        
+                        # If we're checking dates and this message is too old
+                        if not in_range and self.config.start_date:
+                            date_element = await msg_element.querySelector('.time, .date')
+                            if date_element:
+                                date_text = await self.page.evaluate('(element) => element.textContent', date_element)
+                                logger.debug(f"Message with date {date_text} outside date range")
+                                
+                                # Get timestamp if available
+                                timestamp = await self.page.evaluate('''
+                                    (element) => {
+                                        const timeElem = element.querySelector('[data-timestamp]');
+                                        if (timeElem) {
+                                            return parseInt(timeElem.getAttribute('data-timestamp'), 10);
+                                        }
+                                        return null;
+                                    }
+                                ''', msg_element)
+                                
+                                if timestamp:
+                                    msg_date = datetime.fromtimestamp(timestamp / 1000)
+                                    if msg_date.date() < self.config.start_date:
+                                        logger.info(f"Found messages older than start date, stopping scroll")
+                                        consecutive_no_new_posts = max_no_new_attempts  # Force stop
+                            continue
+                        
+                        # Extract post data
+                        post_data = await self._extract_post_data(msg_element)
+                        
+                        if post_data and "id" in post_data:
+                            posts.append(post_data)
+                            new_posts_in_batch += 1
+                            logger.debug(f"Extracted post {len(posts)}/{post_limit}: {post_data.get('id', 'unknown')}")
+                    except Exception as e:
+                        logger.error(f"Error processing message: {str(e)}")
+                
+                # If we have enough posts or found too old messages, stop scrolling
+                if len(posts) >= post_limit or consecutive_no_new_posts >= max_no_new_attempts:
+                    break
+                    
+                # Check if we're at the top of the chat
+                at_top = await self.page.evaluate('''
+                    () => {
+                        const chatContainer = document.querySelector('.chat-container');
+                        return chatContainer && chatContainer.scrollTop <= 10;
+                    }
+                ''')
+                
+                if at_top:
+                    logger.info("Reached the top of the chat history, no more messages")
+                    break
+                    
+                # Scroll up to load older messages
+                scroll_changed = False
+                for _ in range(scroll_batch_size):
+                    scroll_result = await self.page.evaluate('''
+                        () => {
+                            const chatContainer = document.querySelector('.chat-container');
+                            if (chatContainer) {
+                                // Check if we're already at the top
+                                if (chatContainer.scrollTop <= 10) {
+                                    return false;
+                                }
+                                
+                                // Store previous position
+                                const oldScrollTop = chatContainer.scrollTop;
+                                
+                                // Scroll up by 800px to load older messages
+                                chatContainer.scrollTop -= 800;
+                                
+                                // Return true if the scroll position changed
+                                return oldScrollTop !== chatContainer.scrollTop;
+                            }
+                            return false;
+                        }
+                    ''')
+                    
+                    if scroll_result:
+                        scroll_changed = True
+                        scroll_count += 1
+                        
+                    # Small pause between scrolls
+                    await asyncio.sleep(0.3)  
+                
+                # Log scroll status
+                scroll_status = await self.page.evaluate('''
+                    () => {
+                        const chatContainer = document.querySelector('.chat-container');
+                        if (chatContainer) {
+                            return {
+                                scrollTop: chatContainer.scrollTop,
+                                scrollHeight: chatContainer.scrollHeight,
+                                clientHeight: chatContainer.clientHeight
+                            };
+                        }
+                        return null;
+                    }
+                ''')
+                
+                if scroll_status:
+                    logger.debug(f"Scroll position: {scroll_status['scrollTop']} / {scroll_status['scrollHeight']}")
+                
+                # Give time for content to load after scrolling
+                await asyncio.sleep(1.5)
+                
+                # Log batch performance
+                batch_end_time = time.time()
+                batch_duration = batch_end_time - batch_start_time
+                logger.info(f"Batch processed: {new_posts_in_batch} new posts in {batch_duration:.2f}s (total: {len(posts)}/{post_limit})")
+                batch_start_time = batch_end_time
+                
+                # Check if we found new posts or scrolling was effective
+                if new_posts_in_batch == 0 or not scroll_changed:
+                    consecutive_no_new_posts += 1
+                    logger.debug(f"No new content, attempt {consecutive_no_new_posts}/{max_no_new_attempts}")
+                else:
+                    consecutive_no_new_posts = 0
+            
+            logger.info(f"Extracted {len(posts)} posts with {scroll_count} scroll operations")
+            
+            # No need to sort - posts are already in order from newest to oldest
+            # because we started at the bottom and scrolled up
+            
+            return posts
+            
+        except Exception as e:
+            logger.error(f"Error getting posts: {str(e)}")
+            return posts
+    
     async def _extract_post_data(self, message_element) -> Dict[str, Any]:
-        """Extract data from a post element with improved time extraction."""
+        """Extract data from a post element with updated selectors."""
         post_data = {}
         
         try:
@@ -60,38 +426,25 @@ class ChannelParser:
             post_id = await self.page.evaluate('''
                 (element) => {
                     return element.getAttribute('data-mid') || 
-                        element.getAttribute('data-message-id') || 
-                        element.id || 
-                        null;
+                           element.getAttribute('data-message-id') || 
+                           element.id || 
+                           null;
                 }
             ''', message_element)
             post_data["id"] = post_id
             
-            # Get post date and time - extract only time when available
+            # Get post date
             try:
+                # Try multiple date selectors
                 date_element = await message_element.querySelector('.time')
                 if not date_element:
                     date_element = await message_element.querySelector('.date')
                 
                 if date_element:
-                    # Extract just the time (HH:MM) from full timestamp
-                    time_text = await self.page.evaluate('''
-                        (element) => {
-                            const fullText = element.textContent.trim();
-                            
-                            // Try to extract just the time portion (HH:MM)
-                            const timeMatch = fullText.match(/(\d{1,2}:\d{2}(?:\s*(?:AM|PM))?)/i);
-                            if (timeMatch) {
-                                return timeMatch[1];
-                            }
-                            
-                            return fullText; // Fallback to full text if no match
-                        }
-                    ''', date_element)
+                    date_text = await self.page.evaluate('(element) => element.textContent', date_element)
+                    post_data["date"] = date_text
                     
-                    post_data["time"] = time_text
-                    
-                    # Also get full datetime for internal use
+                    # Try to get timestamp
                     timestamp = await self.page.evaluate('''
                         (element) => {
                             if (element.hasAttribute('data-timestamp')) {
@@ -103,13 +456,13 @@ class ChannelParser:
                     
                     if timestamp:
                         post_data["timestamp"] = timestamp
-                        post_data["datetime"] = datetime.fromtimestamp(timestamp / 1000).isoformat()
-                
+                        post_data["datetime"] = datetime.fromtimestamp(timestamp / 1000).isoformat()  # Convert ms to seconds
             except Exception as e:
-                logger.debug(f"Could not get post time: {str(e)}")
+                logger.debug(f"Could not get post date: {str(e)}")
                 
             # Get post content
             try:
+                # Try multiple content selectors
                 content_element = await message_element.querySelector('.message-content')
                 if not content_element:
                     content_element = await message_element.querySelector('.text-content')
@@ -141,40 +494,32 @@ class ChannelParser:
             except Exception as e:
                 logger.debug(f"Could not get post views: {str(e)}")
                 
-            # Get post reactions - improved to combine all reactions
+            # Get post reactions/likes
             try:
-                total_reactions = await self.page.evaluate('''
+                reactions_count = await self.page.evaluate('''
                     (element) => {
-                        // Try finding all reaction counters and sum them
-                        const reactionsElements = element.querySelectorAll('.reactions, .reaction-counter, .like-button');
-                        let totalCount = 0;
+                        // Try multiple selectors for reactions
+                        const reactionsElement = element.querySelector('.reactions, .reaction-counter, .like-button');
+                        if (!reactionsElement) return null;
                         
-                        for (const reactionElem of reactionsElements) {
-                            // For multiple reaction counters, sum them
-                            const counters = reactionElem.querySelectorAll('.counter, .reaction-count');
-                            if (counters.length > 0) {
-                                for (const counter of counters) {
-                                    const count = parseInt(counter.textContent.replace(/[^0-9]/g, ''), 10);
-                                    if (!isNaN(count)) {
-                                        totalCount += count;
-                                    }
-                                }
-                            } else {
-                                // For single reaction counter
-                                const text = reactionElem.textContent;
-                                const match = text.match(/\\d+/);
-                                if (match) {
-                                    totalCount += parseInt(match[0], 10);
-                                }
-                            }
+                        // For new Telegram Web interface
+                        const counters = reactionsElement.querySelectorAll('.counter, .reaction-count');
+                        if (counters.length > 0) {
+                            return Array.from(counters).reduce((sum, el) => {
+                                const count = parseInt(el.textContent, 10);
+                                return sum + (isNaN(count) ? 0 : count);
+                            }, 0);
                         }
                         
-                        return totalCount > 0 ? totalCount : null;
+                        // Fallback to using textContent
+                        const text = reactionsElement.textContent;
+                        const match = text.match(/\\d+/);
+                        return match ? parseInt(match[0], 10) : 0;
                     }
                 ''', message_element)
                 
-                if total_reactions:
-                    post_data["reactions"] = total_reactions
+                if reactions_count:
+                    post_data["reactions"] = reactions_count
             except Exception as e:
                 logger.debug(f"Could not get post reactions: {str(e)}")
                 
@@ -189,38 +534,43 @@ class ChannelParser:
             except Exception as e:
                 logger.debug(f"Could not get post comments: {str(e)}")
                 
-            # Get media type (without URLs)
+            # Get media attachments
             try:
-                media_types = await self.page.evaluate('''
+                # Updated selectors for media
+                media_data = await self.page.evaluate('''
                     (element) => {
-                        const mediaTypes = [];
+                        const media = [];
                         
-                        // Check for photos
+                        // Photos
                         const photos = element.querySelectorAll('.media-photo, img.photo, .attachment-photo');
-                        if (photos.length > 0) {
-                            mediaTypes.push('photo');
-                        }
+                        photos.forEach(photo => {
+                            const src = photo.src || photo.dataset.src;
+                            if (src) media.push({type: 'photo', url: src});
+                        });
                         
-                        // Check for videos
+                        // Videos
                         const videos = element.querySelectorAll('.media-video, video, .attachment-video');
-                        if (videos.length > 0) {
-                            mediaTypes.push('video');
-                        }
+                        videos.forEach(video => {
+                            const src = video.src || video.dataset.src;
+                            if (src) media.push({type: 'video', url: src});
+                        });
                         
-                        // Check for documents
+                        // Documents
                         const docs = element.querySelectorAll('.document, .attachment-document');
-                        if (docs.length > 0) {
-                            mediaTypes.push('document');
-                        }
+                        docs.forEach(doc => {
+                            const nameElem = doc.querySelector('.document-name, .filename');
+                            const name = nameElem ? nameElem.textContent : 'Document';
+                            media.push({type: 'document', name: name});
+                        });
                         
-                        return mediaTypes;
+                        return media;
                     }
                 ''', message_element)
                 
-                if media_types and len(media_types) > 0:
-                    post_data["media_types"] = media_types
+                if media_data and len(media_data) > 0:
+                    post_data["media"] = media_data
             except Exception as e:
-                logger.debug(f"Could not get post media types: {str(e)}")
+                logger.debug(f"Could not get post media: {str(e)}")
                 
             # Get forwarded info
             try:
@@ -235,246 +585,3 @@ class ChannelParser:
         except Exception as e:
             logger.error(f"Error extracting post data: {str(e)}")
             return {"id": "unknown", "error": str(e)}
-
-
-    async def _get_posts(self) -> List[Dict[str, Any]]:
-        """Get posts from the channel with improved scrolling for lazy loading."""
-        posts = []
-        post_limit = self.config.limit
-        
-        logger.info(f"Getting up to {post_limit} posts")
-        
-        try:
-            # Track processed messages to avoid duplicates
-            processed_ids = set()
-            consecutive_no_new_posts = 0
-            max_no_new_attempts = 8  # Increased for more resilient scrolling
-            scroll_count = 0
-            batch_start_time = time.time()
-            
-            # Find the correct scrollable container
-            scroll_containers = await self.page.evaluate('''
-                () => {
-                    const containers = [];
-                    // Try multiple possible scroll container selectors
-                    const selectors = [
-                        '.chat-container', 
-                        '.bubbles-inner',
-                        '.messages-container',
-                        '.history-container',
-                        '.scrollable'
-                    ];
-                    
-                    for (const selector of selectors) {
-                        const element = document.querySelector(selector);
-                        if (element) {
-                            containers.push({
-                                selector,
-                                scrollHeight: element.scrollHeight,
-                                clientHeight: element.clientHeight,
-                                scrollTop: element.scrollTop
-                            });
-                        }
-                    }
-                    
-                    return containers;
-                }
-            ''')
-            
-            if not scroll_containers:
-                logger.error("Could not find scrollable container!")
-                return posts
-                
-            logger.info(f"Found scroll containers: {scroll_containers}")
-            
-            # Choose the container with the largest scrollHeight (likely the main message container)
-            main_container = max(scroll_containers, key=lambda x: x['scrollHeight'])
-            container_selector = main_container['selector']
-            logger.info(f"Using scrollable container: {container_selector}")
-            
-            # Initialize scrolling position to start at the bottom (newest messages)
-            await self.page.evaluate(f'''
-                () => {{
-                    const container = document.querySelector('{container_selector}');
-                    if (container) {{
-                        // Scroll to the very bottom
-                        container.scrollTop = container.scrollHeight;
-                        console.log('Started at newest messages, scroll position:', container.scrollTop);
-                    }}
-                }}
-            ''')
-            
-            # Wait for initial messages to load
-            await asyncio.sleep(4)
-            
-            while len(posts) < post_limit and consecutive_no_new_posts < max_no_new_attempts:
-                # Process currently visible messages
-                message_elements = await self.page.querySelectorAll('.message, .bubble, .message-list-item')
-                
-                if not message_elements:
-                    logger.warning("No message elements found with any selector!")
-                    consecutive_no_new_posts += 1
-                    
-                    # Try more aggressive scrolling if no messages found
-                    await self.page.evaluate(f'''
-                        () => {{
-                            const container = document.querySelector('{container_selector}');
-                            if (container) {{
-                                container.scrollTop -= 1500;  // Larger scroll
-                            }}
-                        }}
-                    ''')
-                    await asyncio.sleep(2)
-                    continue
-                
-                logger.debug(f"Processing {len(message_elements)} visible messages")
-                new_posts_in_batch = 0
-                
-                # Process visible messages
-                for msg_element in message_elements:
-                    if len(posts) >= post_limit:
-                        break
-                        
-                    try:
-                        # Get message ID
-                        msg_id = await self.page.evaluate('''
-                            (element) => {
-                                return element.getAttribute('data-mid') || 
-                                    element.getAttribute('data-message-id') ||
-                                    element.id || 
-                                    element.getAttribute('data-message') ||
-                                    null;
-                            }
-                        ''', msg_element)
-                        
-                        # Skip if no ID or already processed
-                        if not msg_id or msg_id in processed_ids:
-                            continue
-                        
-                        processed_ids.add(msg_id)
-                        
-                        # Check date range if needed
-                        if not await self._is_date_in_range(msg_element):
-                            if self.config.start_date:
-                                # Check if we've gone past the start date
-                                timestamp = await self.page.evaluate('''
-                                    (element) => {
-                                        const timeElem = element.querySelector('[data-timestamp]');
-                                        if (timeElem) {
-                                            return parseInt(timeElem.getAttribute('data-timestamp'), 10);
-                                        }
-                                        return null;
-                                    }
-                                ''', msg_element)
-                                
-                                if timestamp:
-                                    msg_date = datetime.fromtimestamp(timestamp / 1000)
-                                    if msg_date.date() < self.config.start_date:
-                                        logger.info(f"Found messages older than start date, stopping")
-                                        consecutive_no_new_posts = max_no_new_attempts  # Force stop
-                            continue
-                        
-                        # Extract post data
-                        post_data = await self._extract_post_data(msg_element)
-                        
-                        if post_data and "id" in post_data:
-                            posts.append(post_data)
-                            new_posts_in_batch += 1
-                            logger.debug(f"Extracted post {len(posts)}/{post_limit}: {post_data.get('id', 'unknown')}")
-                    except Exception as e:
-                        logger.error(f"Error processing message: {str(e)}")
-                
-                # If we have enough posts, stop scrolling
-                if len(posts) >= post_limit:
-                    break
-                    
-                # Check scroll position
-                scroll_info = await self.page.evaluate(f'''
-                    () => {{
-                        const container = document.querySelector('{container_selector}');
-                        if (container) {{
-                            return {{
-                                scrollTop: container.scrollTop,
-                                scrollHeight: container.scrollHeight,
-                                clientHeight: container.clientHeight,
-                                atTop: container.scrollTop <= 10
-                            }};
-                        }}
-                        return null;
-                    }}
-                ''')
-                
-                if scroll_info:
-                    logger.debug(f"Scroll position: {scroll_info['scrollTop']} / {scroll_info['scrollHeight']}")
-                    
-                    # Check if we've reached the top
-                    if scroll_info['atTop']:
-                        logger.info("Reached the top of the chat, no more messages")
-                        break
-                
-                # Use a more aggressive scrolling approach to ensure more messages load
-                scroll_changed = await self.page.evaluate(f'''
-                    () => {{
-                        const container = document.querySelector('{container_selector}');
-                        if (container) {{
-                            const oldScrollTop = container.scrollTop;
-                            
-                            // Scroll up by a significant amount
-                            container.scrollTop -= 1200;
-                            
-                            // Force a redraw to ensure DOM updates
-                            container.style.display = 'none';
-                            void container.offsetHeight; // Trigger reflow
-                            container.style.display = '';
-                            
-                            return {{
-                                changed: oldScrollTop !== container.scrollTop,
-                                oldPos: oldScrollTop,
-                                newPos: container.scrollTop
-                            }};
-                        }}
-                        return {{ changed: false }};
-                    }}
-                ''')
-                
-                scroll_count += 1
-                
-                # Log scroll result
-                if scroll_changed:
-                    logger.debug(f"Scroll result: {scroll_changed}")
-                
-                # Give DOM time to update with new messages
-                await asyncio.sleep(2)
-                
-                # Log batch performance
-                batch_end_time = time.time()
-                batch_duration = batch_end_time - batch_start_time
-                logger.info(f"Batch processed: {new_posts_in_batch} new posts in {batch_duration:.2f}s (total: {len(posts)}/{post_limit})")
-                batch_start_time = batch_end_time
-                
-                # Monitor progress
-                if new_posts_in_batch == 0:
-                    consecutive_no_new_posts += 1
-                    logger.debug(f"No new posts in batch, attempt {consecutive_no_new_posts}/{max_no_new_attempts}")
-                    
-                    if consecutive_no_new_posts >= 3:
-                        # After a few failed attempts, try a more extreme scroll and wait longer
-                        await self.page.evaluate(f'''
-                            () => {{
-                                const container = document.querySelector('{container_selector}');
-                                if (container) {{
-                                    // More extreme scroll to try to trigger loading
-                                    container.scrollTop = Math.max(0, container.scrollTop - 2000);
-                                }}
-                            }}
-                        ''')
-                        await asyncio.sleep(3)  # Longer wait for content to load
-                else:
-                    consecutive_no_new_posts = 0
-            
-            logger.info(f"Extracted {len(posts)} posts with {scroll_count} scroll operations")
-            return posts
-            
-        except Exception as e:
-            logger.error(f"Error getting posts: {str(e)}")
-            return posts
